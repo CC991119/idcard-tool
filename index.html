@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>身份证处理工具</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><circle cx="8" cy="10" r="2"/><path d="M14 9h4M14 13h4M6 15h6"/></svg>
+    <span>身份证处理工具</span>
+  </div>
+  <div class="privacy">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    图片不会上传，全部在本机处理
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-tab="card" role="tab">身份证抠图拼接</button>
+  <button class="tab" data-tab="conv" role="tab">格式转换</button>
+</nav>
+
+<main>
+  <!-- 身份证 -->
+  <section id="panel-card" class="panel active">
+    <div class="grid2">
+      <div class="drop" id="drop-front" tabindex="0">
+        <input type="file" id="file-front" accept="image/*" hidden>
+        <div class="drop-inner">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="4" width="20" height="16" rx="2"/><circle cx="8" cy="10" r="2.2"/><path d="M14 9h4M14 13h4"/></svg>
+          <div class="drop-title">正面（有照片那面）</div>
+          <div class="drop-hint">点击选择，或把图片拖进来</div>
+        </div>
+        <canvas class="thumb" hidden></canvas>
+      </div>
+      <div class="drop" id="drop-back" tabindex="0">
+        <input type="file" id="file-back" accept="image/*" hidden>
+        <div class="drop-inner">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 9h12M6 13h12M6 17h7"/></svg>
+          <div class="drop-title">背面（有签发机关那面）</div>
+          <div class="drop-hint">点击选择，或把图片拖进来</div>
+        </div>
+        <canvas class="thumb" hidden></canvas>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="ctl">
+        <label for="margin">边缘留白 <output id="margin-out">3%</output></label>
+        <input type="range" id="margin" min="0" max="12" step="0.5" value="3">
+        <span class="tip">留白越大，四个角越保险</span>
+      </div>
+      <div class="ctl">
+        <label for="gap">两张之间的间距 <output id="gap-out">20</output></label>
+        <input type="range" id="gap" min="0" max="80" step="2" value="20">
+      </div>
+      <div class="ctl">
+        <label for="quality">图片质量 <output id="quality-out">92</output></label>
+        <input type="range" id="quality" min="60" max="100" step="1" value="92">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="btn-run" class="primary" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7V5a1 1 0 011-1h2M17 4h2a1 1 0 011 1v2M20 17v2a1 1 0 01-1 1h-2M7 20H5a1 1 0 01-1-1v-2"/></svg>
+        开始处理
+      </button>
+      <button id="btn-save" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+        保存 JPG
+      </button>
+      <span id="card-status" class="status"></span>
+    </div>
+
+    <div class="result">
+      <canvas id="out-canvas" hidden></canvas>
+      <p id="result-empty" class="empty">选好正反面两张图，点“开始处理”</p>
+    </div>
+  </section>
+
+  <!-- 转换 -->
+  <section id="panel-conv" class="panel">
+    <div class="drop wide" id="drop-conv" tabindex="0">
+      <input type="file" id="file-conv" accept="image/*,.pdf" multiple hidden>
+      <div class="drop-inner">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>
+        <div class="drop-title">选择文件</div>
+        <div class="drop-hint">支持 PDF 和各种图片，可以一次选多个</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="ctl">
+        <label for="conv-target">转成什么</label>
+        <select id="conv-target">
+          <option value="jpg">JPG 图片</option>
+          <option value="png">PNG 图片</option>
+          <option value="pdf">PDF 文件</option>
+        </select>
+      </div>
+      <div class="ctl">
+        <label for="conv-dpi">清晰度 <output id="conv-dpi-out">150</output></label>
+        <input type="range" id="conv-dpi" min="72" max="300" step="6" value="150">
+        <span class="tip">PDF 转图片时生效</span>
+      </div>
+      <div class="ctl">
+        <label for="conv-quality">图片质量 <output id="conv-quality-out">92</output></label>
+        <input type="range" id="conv-quality" min="60" max="100" step="1" value="92">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="btn-conv" class="primary" disabled>开始转换</button>
+      <span id="conv-status" class="status"></span>
+    </div>
+
+    <ul id="conv-list" class="filelist"></ul>
+  </section>
+</main>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
