@@ -75,11 +75,46 @@ function scoreQuad(quad, imgArea, isMerged = false) {
   if (frac >= 0.08 && frac <= 0.55) areaScore = 1;
   else if (frac < 0.08) areaScore = Math.max(0, frac / 0.08);
   else areaScore = Math.max(0, 1 - (frac - 0.55) / 0.45);
-  const arScore = Math.max(0, 1 - Math.abs(ar - CARD_ASPECT) / CARD_ASPECT);
+  // 比例偏离按相对误差算, 偏离越多掉得越快;
+  // 背面只圈住文字行时比例会明显偏长, 这里必须狠扣, 否则会选中残缺框
+  const arErr = Math.abs(ar - CARD_ASPECT) / CARD_ASPECT;
+  const arScore = Math.max(0, 1 - arErr * 1.6);
   // 合并候选按满填充计, 避免碎块拼出的正确轮廓被压制
   const fill = isMerged ? 1 : (rectArea > 0 ? Math.min(1, polygonArea(quad) / rectArea) : 0);
   const penalty = frac > 0.8 ? 0.3 : 0;
-  return Math.max(0, 0.35 * arScore + 0.30 * areaScore + 0.20 * fill - 0.15 * penalty);
+  return Math.max(0, 0.42 * arScore + 0.26 * areaScore + 0.17 * fill - 0.15 * penalty);
+}
+
+/**
+ * 身份证长宽比固定 (85.6:54)。若候选框比例偏离, 说明它只框住了卡的一部分
+ * (背面常只圈到几行文字)。这里沿短的那一边把框补足到标准比例, 只放大不缩小,
+ * 宁可多带一点背景, 也不切掉卡的边角。
+ */
+function fitToCardAspect(quad) {
+  const r = minAreaRect(quad);
+  if (!r) return quad;
+  let { w, h, cx, cy } = r;
+  if (w < 1 || h < 1) return quad;
+  // 以长边为基准方向, 保证不把横竖判断弄反
+  const pts = r.pts;
+  let ux, uy;
+  if (w >= h) {
+    ux = (pts[1][0] - pts[0][0]) / w; uy = (pts[1][1] - pts[0][1]) / w;
+  } else {
+    ux = (pts[3][0] - pts[0][0]) / h; uy = (pts[3][1] - pts[0][1]) / h;
+    const t = w; w = h; h = t;
+  }
+  const nx = -uy, ny = ux;
+  // 只补足, 不裁剪
+  const needW = Math.max(w, h * CARD_ASPECT);
+  const needH = Math.max(h, w / CARD_ASPECT);
+  const hw = needW / 2, hh = needH / 2;
+  return [
+    [cx - hw * ux - hh * nx, cy - hw * uy - hh * ny],
+    [cx + hw * ux - hh * nx, cy + hw * uy - hh * ny],
+    [cx + hw * ux + hh * nx, cy + hw * uy + hh * ny],
+    [cx - hw * ux + hh * nx, cy - hw * uy + hh * ny],
+  ];
 }
 
 /**
@@ -98,24 +133,64 @@ export function findCardQuad(rgba, W, H) {
   try { cands = cands.concat(candEdges(gray, w, h)); } catch (e) {}
   try { cands = cands.concat(candBgDiff(gray, w, h)); } catch (e) {}
   try { cands = cands.concat(candAdaptive(gray, w, h)); } catch (e) {}
-  let best = null, bestScore = -1;
+  // 每个候选都额外产出一个"按标准比例补全"的版本一起参与打分
+  const expanded = [];
   const seen = new Set();
   for (const c of cands) {
     const key = c.quad.map(p => Math.round(p[0]) + ',' + Math.round(p[1])).join(';');
     if (seen.has(key)) continue;
     seen.add(key);
-    const s = scoreQuad(c.quad, imgArea, c.src.endsWith('+merge'));
-    if (s > bestScore) { bestScore = s; best = c; }
+    const merged = c.src.endsWith('+merge');
+    expanded.push({ quad: c.quad, src: c.src, score: scoreQuad(c.quad, imgArea, merged) });
+    const fitted = fitToCardAspect(c.quad);
+    const fkey = fitted.map(p => Math.round(p[0]) + ',' + Math.round(p[1])).join(';');
+    if (!seen.has(fkey)) {
+      seen.add(fkey);
+      // 补全是"猜"出来的形状, 打个折扣;
+      // 只有当原始框比例明显不像身份证时, 补全版才可能胜出
+      expanded.push({
+        quad: fitted,
+        src: c.src + '+fit',
+        score: scoreQuad(fitted, imgArea, merged) * 0.82,
+      });
+    }
   }
-  if (!best || bestScore <= 0.05) {
-    return { quad: [[0, 0], [W, 0], [W, H], [0, H]], score: -0.01, method: 'fallback' };
-  }
+  // 补全版只作为备选参与排序; 同分时优先原始候选, 避免补全把框推偏
+  expanded.sort((a, b) => (b.score - a.score) || (a.src.endsWith('+fit') ? 1 : -1));
   const inv = 1 / useScale;
-  return {
-    quad: best.quad.map(p => [p[0] * inv, p[1] * inv]),
-    score: bestScore,
-    method: best.src,
-  };
+  const toFull = (q) => q.map(p => [p[0] * inv, p[1] * inv]);
+  const whole = [[0, 0], [W, 0], [W, H], [0, H]];
+  if (!expanded.length || expanded[0].score <= 0.05) {
+    return { quad: whole, score: -0.01, method: 'fallback', alts: [] };
+  }
+  // 备选方案: 供界面上"换一个识别结果"使用, 去掉位置太接近的重复项
+  const alts = [];
+  for (const c of expanded.slice(1)) {
+    if (alts.length >= 5) break;
+    const q = toFull(c.quad);
+    const near = alts.concat([{ quad: toFull(expanded[0].quad) }]).some(a => {
+      const ao = orderPts(a.quad), qo = orderPts(q);
+      return ao.every((p, i) => dist(p, qo[i]) < Math.max(W, H) * 0.04);
+    });
+    if (!near) alts.push({ quad: q, score: c.score, method: c.src });
+  }
+  alts.push({ quad: whole, score: 0, method: '整幅图' });
+  // 最后一道保险: 胜出的框如果比例明显不像身份证, 说明只框到了卡的一部分
+  // (背面只有文字行时最常见)。这里按标准比例往外补足, 原框留作备选。
+  let best = toFull(expanded[0].quad);
+  let method = expanded[0].src;
+  if (!method.endsWith('+fit')) {
+    const r = minAreaRect(best);
+    if (r) {
+      const ar = Math.max(r.w, r.h) / Math.max(1, Math.min(r.w, r.h));
+      if (Math.abs(ar - CARD_ASPECT) / CARD_ASPECT > 0.25) {
+        alts.unshift({ quad: best, score: expanded[0].score, method: method + '(未补全)' });
+        best = fitToCardAspect(best);
+        method = method + '+保险补全';
+      }
+    }
+  }
+  return { quad: best, score: expanded[0].score, method, alts };
 }
 
 // 最近邻缩放 RGBA

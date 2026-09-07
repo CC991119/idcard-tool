@@ -49,8 +49,8 @@
 
     <div class="controls">
       <div class="ctl">
-        <label for="margin">边缘留白 <output id="margin-out">3%</output></label>
-        <input type="range" id="margin" min="0" max="12" step="0.5" value="3">
+        <label for="margin">边缘留白 <output id="margin-out">5%</output></label>
+        <input type="range" id="margin" min="0" max="12" step="0.5" value="5">
         <span class="tip">留白越大，四个角越保险</span>
       </div>
       <div class="ctl">
@@ -66,7 +66,7 @@
     <div class="actions">
       <button id="btn-run" class="primary" disabled>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7V5a1 1 0 011-1h2M17 4h2a1 1 0 011 1v2M20 17v2a1 1 0 01-1 1h-2M7 20H5a1 1 0 01-1-1v-2"/></svg>
-        开始处理
+        识别边框
       </button>
       <button id="btn-save" disabled title="会弹出窗口让你选保存位置，默认停在原图所在的文件夹">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
@@ -75,9 +75,66 @@
       <span id="card-status" class="status"></span>
     </div>
 
+    <!-- 处理前先确认边框: 自动识别不准时可直接拖四个角 -->
+    <section id="adjust" class="adjust" hidden>
+      <div class="adjust-head">
+        <h2>确认边框位置</h2>
+        <p>白线里面是会被保留的部分。四个角上的圆点可以直接拖动，把线拖到身份证的边角外侧一点最稳。</p>
+      </div>
+      <div class="adjust-grid">
+        <div class="adj-item">
+          <div class="adj-label">正面</div>
+          <div class="adj-stage" id="stage-front">
+            <canvas class="adj-canvas" id="adj-front"></canvas>
+          </div>
+          <div class="adj-tools">
+            <button class="mini" data-reset="front" title="回到自动识别的位置">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8"/><path d="M3 3v5h5"/></svg>
+              重新识别
+            </button>
+            <button class="mini" data-alt="front" title="换一个识别结果试试">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M16 3h5v5"/><path d="M8 21H3v-5"/><path d="M21 3l-9 9"/><path d="M3 21l9-9"/></svg>
+              换一个
+            </button>
+            <button class="mini" data-full="front" title="不裁剪，保留整张照片">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+              用整张
+            </button>
+          </div>
+        </div>
+        <div class="adj-item">
+          <div class="adj-label">背面</div>
+          <div class="adj-stage" id="stage-back">
+            <canvas class="adj-canvas" id="adj-back"></canvas>
+          </div>
+          <div class="adj-tools">
+            <button class="mini" data-reset="back" title="回到自动识别的位置">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8"/><path d="M3 3v5h5"/></svg>
+              重新识别
+            </button>
+            <button class="mini" data-alt="back" title="换一个识别结果试试">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M16 3h5v5"/><path d="M8 21H3v-5"/><path d="M21 3l-9 9"/><path d="M3 21l9-9"/></svg>
+              换一个
+            </button>
+            <button class="mini" data-full="back" title="不裁剪，保留整张照片">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+              用整张
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="btn-confirm" class="primary">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 6L9 17l-5-5"/></svg>
+          按这个边框拼接
+        </button>
+        <span id="adjust-status" class="status"></span>
+      </div>
+    </section>
+
     <div class="result">
       <canvas id="out-canvas" hidden></canvas>
-      <p id="result-empty" class="empty">选好正反面两张图，点“开始处理”</p>
+      <p id="result-empty" class="empty">选好正反面两张图，点“识别边框”</p>
     </div>
   </section>
 

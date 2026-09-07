@@ -199,6 +199,58 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .status { color: var(--ink-soft); font-size: 12.5px; }
 .status.err { color: var(--danger); }
 
+/* 边框确认区 */
+.adjust {
+  margin-bottom: 16px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.adjust-head h2 { margin: 0 0 4px; font-size: 14.5px; }
+.adjust-head p { margin: 0 0 14px; color: var(--ink-soft); font-size: 12.5px; }
+
+.adjust-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.adj-item { min-width: 0; }
+.adj-label { font-weight: 600; font-size: 12.5px; margin-bottom: 6px; }
+
+.adj-stage {
+  position: relative;
+  background: #eceff2;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  overflow: hidden;
+  aspect-ratio: 4 / 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.adj-canvas {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.adj-tools { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+
+button.mini {
+  padding: 4px 9px;
+  font-size: 12px;
+  gap: 5px;
+}
+
+button.mini svg { width: 13px; height: 13px; }
+
 .result {
   padding: 16px;
   background: var(--surface);

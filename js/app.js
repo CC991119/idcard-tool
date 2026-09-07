@@ -1,6 +1,7 @@
 // 界面逻辑: 全部在浏览器本地运行, 不上传任何文件
 import { findCardQuad, warpCard, mergeSides } from './detect.js';
 import { canvasesToPdf } from './pdfout.js';
+import { QuadEditor } from './adjust.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -181,6 +182,11 @@ function triggerDownload(blob, name) {
 
 // ---------- 身份证 ----------
 const state = { front: null, back: null, merged: null };
+// 每一面的边框状态: 编辑器实例 / 自动识别结果 / 备选方案 / 当前用的是第几个备选
+const edit = {
+  front: { editor: null, auto: null, alts: [], altIdx: -1 },
+  back: { editor: null, auto: null, alts: [], altIdx: -1 },
+};
 
 function refreshRunBtn() {
   $('btn-run').disabled = !(state.front && state.back);
@@ -201,6 +207,13 @@ function loadSide(which) {
       if (handles && handles[0]) lastSourceHandle = handles[0];
       drawThumb(drop.querySelector('.thumb'), data);
       drop.classList.add('loaded');
+      // 换了图, 之前的边框和结果都不再有效
+      edit[which] = { editor: null, auto: null, alts: [], altIdx: -1 };
+      $('adjust').hidden = true;
+      $('out-canvas').hidden = true;
+      $('result-empty').hidden = false;
+      $('btn-save').disabled = true;
+      state.merged = null;
       setCardStatus('');
       refreshRunBtn();
     } catch (err) {
@@ -212,12 +225,84 @@ function loadSide(which) {
 bindDrop('drop-front', 'file-front', loadSide('front'));
 bindDrop('drop-back', 'file-back', loadSide('back'));
 
+// 第一步: 识别边框, 交给用户确认
 $('btn-run').addEventListener('click', async () => {
   if (!state.front || !state.back) return;
   const btn = $('btn-run');
   btn.disabled = true;
   setCardStatus('正在识别边框...');
-  // 让浏览器有机会渲染这行提示
+  await new Promise(r => setTimeout(r, 30));
+  try {
+    for (const which of ['front', 'back']) {
+      const d = state[which];
+      const r = findCardQuad(d.data, d.width, d.height);
+      const st = edit[which];
+      st.auto = r.quad;
+      st.alts = r.alts || [];
+      st.altIdx = -1;
+      const cv = $('adj-' + which);
+      st.editor = new QuadEditor(cv, d, r.quad, () => setAdjustStatus('边框已调整，确认后点下面的按钮'));
+      setCardStatus(which === 'front' ? '正面识别完成，继续识别背面...' : '识别完成');
+      await new Promise(r2 => setTimeout(r2, 20));
+    }
+    $('adjust').hidden = false;
+    setAdjustStatus('识别不准的话，直接拖动四个角上的圆点');
+    setCardStatus('请先确认下面的边框位置');
+    $('adjust').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    // 供自动化检查读取当前边框位置, 不影响正常使用
+    window.__quadOf = (w) => edit[w].editor ? edit[w].editor.getQuad() : null;
+    window.__scaleOf = (w) => edit[w].editor ? edit[w].editor.scale : 1;
+  } catch (err) {
+    setCardStatus('识别失败：' + err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function setAdjustStatus(msg, isErr = false) {
+  const el = $('adjust-status');
+  el.textContent = msg;
+  el.classList.toggle('err', isErr);
+}
+
+// 三个小按钮: 重新识别 / 换一个 / 用整张
+document.querySelectorAll('[data-reset]').forEach(b => {
+  b.addEventListener('click', () => {
+    const w = b.dataset.reset, st = edit[w];
+    if (!st.editor || !st.auto) return;
+    st.altIdx = -1;
+    st.editor.setQuad(st.auto);
+    setAdjustStatus('已回到自动识别的位置');
+  });
+});
+
+document.querySelectorAll('[data-alt]').forEach(b => {
+  b.addEventListener('click', () => {
+    const w = b.dataset.alt, st = edit[w];
+    if (!st.editor) return;
+    if (!st.alts.length) { setAdjustStatus('这张图没有其他候选了，可以手动拖角'); return; }
+    st.altIdx = (st.altIdx + 1) % st.alts.length;
+    st.editor.setQuad(st.alts[st.altIdx].quad);
+    setAdjustStatus('换到第 ' + (st.altIdx + 1) + ' / ' + st.alts.length + ' 个候选');
+  });
+});
+
+document.querySelectorAll('[data-full]').forEach(b => {
+  b.addEventListener('click', () => {
+    const w = b.dataset.full, st = edit[w], d = state[w];
+    if (!st.editor || !d) return;
+    st.altIdx = -1;
+    st.editor.setQuad([[0, 0], [d.width, 0], [d.width, d.height], [0, d.height]]);
+    setAdjustStatus('已改成保留整张照片，不裁剪');
+  });
+});
+
+// 第二步: 按确认后的边框抠图拼接
+$('btn-confirm').addEventListener('click', async () => {
+  const btn = $('btn-confirm');
+  if (!edit.front.editor || !edit.back.editor) return;
+  btn.disabled = true;
+  setAdjustStatus('正在拼接...');
   await new Promise(r => setTimeout(r, 30));
   try {
     const margin = parseFloat($('margin').value) / 100;
@@ -225,9 +310,7 @@ $('btn-run').addEventListener('click', async () => {
     const out = [];
     for (const which of ['front', 'back']) {
       const d = state[which];
-      const q = findCardQuad(d.data, d.width, d.height);
-      out.push(warpCard(d.data, d.width, d.height, q.quad, margin));
-      setCardStatus(which === 'front' ? '正面识别完成，继续处理背面...' : '正在拼接...');
+      out.push(warpCard(d.data, d.width, d.height, edit[which].editor.getQuad(), margin));
       await new Promise(r => setTimeout(r, 20));
     }
     const merged = mergeSides(out[0], out[1], gap, 10);
@@ -236,9 +319,11 @@ $('btn-run').addEventListener('click', async () => {
     $('out-canvas').hidden = false;
     $('result-empty').hidden = true;
     $('btn-save').disabled = false;
+    setAdjustStatus('拼接完成，结果在下面');
     setCardStatus('处理完成，' + merged.width + ' × ' + merged.height + ' 像素');
+    $('out-canvas').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (err) {
-    setCardStatus('处理失败：' + err.message, true);
+    setAdjustStatus('拼接失败：' + err.message, true);
   } finally {
     btn.disabled = false;
   }
