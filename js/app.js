@@ -72,15 +72,48 @@ function drawThumb(canvas, imageData, maxSide = 520) {
   canvas.hidden = false;
 }
 
+// 浏览器是否支持"另存为"弹窗 (Chrome / Edge 支持, Firefox / Safari 不支持)
+// 每次用到时再判断, 避免页面刚打开时判断结果被记死
+const canPickSave = () => typeof window.showSaveFilePicker === 'function';
+const canPickOpen = () => typeof window.showOpenFilePicker === 'function';
+
+const IMAGE_MIME = {
+  'image/jpeg': ['.jpg', '.jpeg'],
+  'image/png': ['.png'],
+  'image/webp': ['.webp'],
+  'image/bmp': ['.bmp'],
+  'image/gif': ['.gif'],
+};
+const ACCEPT_IMAGE = { description: '图片', accept: IMAGE_MIME };
+const ACCEPT_ANY = {
+  description: 'PDF 和图片',
+  accept: Object.assign({ 'application/pdf': ['.pdf'] }, IMAGE_MIME),
+};
+
 // 通用拖放/点选绑定
-function bindDrop(dropId, inputId, onFiles, multiple = false) {
+// onFiles(files, handles): handles 是文件位置句柄, 用来让保存弹窗停在原图那个文件夹
+function bindDrop(dropId, inputId, onFiles, multiple = false, accept = ACCEPT_IMAGE) {
   const drop = $(dropId), input = $(inputId);
-  drop.addEventListener('click', () => input.click());
+  const open = async () => {
+    if (canPickOpen()) {
+      try {
+        const handles = await window.showOpenFilePicker({ multiple, types: [accept] });
+        const files = await Promise.all(handles.map(h => h.getFile()));
+        if (files.length) onFiles(files, handles);
+        return;
+      } catch (err) {
+        // 用户按了取消就什么都不做, 其他意外情况退回普通选择框
+        if (err && err.name === 'AbortError') return;
+      }
+    }
+    input.click();
+  };
+  drop.addEventListener('click', open);
   drop.addEventListener('keydown', e => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
   });
   input.addEventListener('change', () => {
-    if (input.files && input.files.length) onFiles([...input.files]);
+    if (input.files && input.files.length) onFiles([...input.files], null);
   });
   ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => {
     e.preventDefault(); drop.classList.add('dragover');
@@ -90,8 +123,60 @@ function bindDrop(dropId, inputId, onFiles, multiple = false) {
   }));
   drop.addEventListener('drop', e => {
     const fs = [...(e.dataTransfer?.files || [])];
-    if (fs.length) onFiles(multiple ? fs : [fs[0]]);
+    if (fs.length) onFiles(multiple ? fs : [fs[0]], null);
   });
+}
+
+// ---------- 保存 ----------
+// 记住最近一次选图的位置句柄, 保存弹窗会停在同一个文件夹
+let lastSourceHandle = null;
+
+// 保存文件: 支持的浏览器弹出"另存为"窗口, 不支持的直接下载
+// makeBlob 可以是 Blob, 也可以是一个返回 Blob 的函数;
+// 传函数时会先弹窗再生成, 避免浏览器因等待过久而拒绝打开弹窗
+async function saveBlob(makeBlob, name) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  const types = [];
+  if (ext === 'jpg' || ext === 'jpeg') types.push({ description: 'JPG 图片', accept: { 'image/jpeg': ['.jpg'] } });
+  else if (ext === 'png') types.push({ description: 'PNG 图片', accept: { 'image/png': ['.png'] } });
+  else if (ext === 'pdf') types.push({ description: 'PDF 文件', accept: { 'application/pdf': ['.pdf'] } });
+
+  const getBlob = async () => (typeof makeBlob === 'function' ? await makeBlob() : makeBlob);
+
+  if (canPickSave()) {
+    const opts = { suggestedName: name };
+    if (types.length) opts.types = types;
+    // startIn 传入原图句柄, 弹窗就会停在原图所在的文件夹
+    if (lastSourceHandle) opts.startIn = lastSourceHandle;
+    else opts.id = 'idcard-save';
+    let handle;
+    try {
+      handle = await window.showSaveFilePicker(opts);
+    } catch (err) {
+      if (err && err.name === 'AbortError') return { ok: false, cancelled: true };
+      // 弹窗因为任何原因用不了, 退回普通下载, 不让用户白点一次
+      triggerDownload(await getBlob(), name);
+      return { ok: true, fallback: true, name };
+    }
+    const blob = await getBlob();
+    if (!blob) throw new Error('生成文件失败');
+    const w = await handle.createWritable();
+    await w.write(blob);
+    await w.close();
+    return { ok: true, name: handle.name };
+  }
+  triggerDownload(await getBlob(), name);
+  return { ok: true, fallback: true, name };
+}
+
+function triggerDownload(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
 
 // ---------- 身份证 ----------
@@ -108,11 +193,12 @@ function setCardStatus(msg, isErr = false) {
 }
 
 function loadSide(which) {
-  return async (files) => {
+  return async (files, handles) => {
     const drop = $('drop-' + which);
     try {
       const data = await fileToImageData(files[0]);
       state[which] = data;
+      if (handles && handles[0]) lastSourceHandle = handles[0];
       drawThumb(drop.querySelector('.thumb'), data);
       drop.classList.add('loaded');
       setCardStatus('');
@@ -158,22 +244,25 @@ $('btn-run').addEventListener('click', async () => {
   }
 });
 
-$('btn-save').addEventListener('click', () => {
+$('btn-save').addEventListener('click', async () => {
+  const btn = $('btn-save');
   const q = parseInt($('quality').value, 10) / 100;
-  $('out-canvas').toBlob(b => {
-    if (b) triggerDownload(b, '身份证-正反面.jpg');
-  }, 'image/jpeg', q);
+  btn.disabled = true;
+  try {
+    // 先弹窗问位置, 用户确认后再生成图片
+    const r = await saveBlob(
+      () => new Promise(res => $('out-canvas').toBlob(res, 'image/jpeg', q)),
+      '身份证-正反面.jpg'
+    );
+    if (r.cancelled) setCardStatus('已取消保存');
+    else if (r.fallback) setCardStatus('已保存到浏览器的下载文件夹：' + r.name);
+    else setCardStatus('已保存：' + r.name);
+  } catch (err) {
+    setCardStatus('保存失败：' + err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
 });
-
-function triggerDownload(blob, name) {
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-}
 
 // ---------- 格式转换 ----------
 const convFiles = [];
@@ -200,8 +289,24 @@ function renderConvList() {
     for (const r of f.results || []) {
       const b = document.createElement('button');
       b.className = 'dl';
-      b.textContent = '下载 ' + r.name.split('.').pop().toUpperCase() + (f.results.length > 1 ? ' ' + r.idx : '');
-      b.addEventListener('click', () => triggerDownload(r.blob, r.name));
+      const label = (canPickSave() ? '保存 ' : '下载 ')
+        + r.name.split('.').pop().toUpperCase()
+        + (f.results.length > 1 ? ' ' + r.idx : '');
+      b.textContent = label;
+      b.addEventListener('click', async () => {
+        b.disabled = true;
+        try {
+          if (f.handle) lastSourceHandle = f.handle;
+          const res = await saveBlob(r.blob, r.name);
+          if (res.cancelled) b.textContent = label;
+          else b.textContent = '已保存';
+        } catch (err) {
+          setConvStatus('保存失败：' + err.message, true);
+          b.textContent = label;
+        } finally {
+          b.disabled = false;
+        }
+      });
       li.append(b);
     }
     ul.append(li);
@@ -209,11 +314,14 @@ function renderConvList() {
   $('btn-conv').disabled = convFiles.length === 0;
 }
 
-bindDrop('drop-conv', 'file-conv', (files) => {
-  for (const f of files) convFiles.push({ file: f });
+bindDrop('drop-conv', 'file-conv', (files, handles) => {
+  files.forEach((f, i) => {
+    convFiles.push({ file: f, handle: handles && handles[i] ? handles[i] : null });
+  });
+  if (handles && handles[0]) lastSourceHandle = handles[0];
   setConvStatus('');
   renderConvList();
-}, true);
+}, true, ACCEPT_ANY);
 
 let pdfjsPromise = null;
 // 按需加载 pdf.js: 不用转 PDF 就完全不下载
