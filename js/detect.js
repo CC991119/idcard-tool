@@ -117,6 +117,44 @@ function fitToCardAspect(quad) {
   ];
 }
 
+// 找卡上"内容"的包围盒。文字/头像比卡底色暗很多, 用亮度差找出来。
+// 这个包围盒一定是卡内部的范围, 如果识别框连它都装不下, 说明框切小了。
+function contentBBox(gray, w, h) {
+  const step = Math.max(2, Math.round(Math.min(w, h) / 250));
+  let sum = 0, cnt = 0;
+  for (let y = 0; y < h; y += step) {
+    for (let x = 0; x < w; x += step) { sum += gray[y * w + x]; cnt++; }
+  }
+  const mean = sum / Math.max(1, cnt);
+  const th = mean * 0.78;
+  let minX = w, minY = h, maxX = -1, maxY = -1, n = 0;
+  for (let y = 0; y < h; y += step) {
+    for (let x = 0; x < w; x += step) {
+      if (gray[y * w + x] < th) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        n++;
+      }
+    }
+  }
+  if (n < 15 || maxX < 0) return null;
+  return { minX, minY, maxX, maxY, n };
+}
+
+// 求一个四边形的轴对齐包围盒
+function quadBBox(quad) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of quad) {
+    if (p[0] < minX) minX = p[0];
+    if (p[0] > maxX) maxX = p[0];
+    if (p[1] < minY) minY = p[1];
+    if (p[1] > maxY) maxY = p[1];
+  }
+  return { minX, minY, maxX, maxY };
+}
+
 /**
  * 找出身份证四角。传入 RGBA 像素, 返回原图坐标系下的 quad。
  * 永不失败: 找不到就回退整幅图。
@@ -190,6 +228,51 @@ export function findCardQuad(rgba, W, H) {
       }
     }
   }
+
+  // 内容兜底: 卡上的文字/头像一定在卡内部。
+  // 如果识别框连这些内容都装不下, 说明框切小了, 往外扩到刚好包住内容。
+  const cbSmall = contentBBox(gray, w, h);
+  if (cbSmall) {
+    // 把内容包围盒从工作坐标转回原图坐标
+    const cb = {
+      minX: cbSmall.minX * inv, minY: cbSmall.minY * inv,
+      maxX: cbSmall.maxX * inv, maxY: cbSmall.maxY * inv,
+    };
+    const tol = 0.02 * Math.max(W, H);
+    // 内容包围盒本身占了图片 85% 以上时, 说明被深色背景干扰了,
+    // 找出来的不是卡上的内容, 跳过兜底, 别把框撑爆
+    const cbW = cb.maxX - cb.minX, cbH = cb.maxY - cb.minY;
+    if (cbW < W * 0.85 && cbH < H * 0.85) {
+      const qBox = quadBBox(best);
+      const outside = cb.minX < qBox.minX - tol || cb.minY < qBox.minY - tol
+        || cb.maxX > qBox.maxX + tol || cb.maxY > qBox.maxY + tol;
+      if (outside) {
+        const original = best.slice();
+        let t = 0;
+        // 最多往外扩 50%, 超过说明内容包围盒被背景干扰了, 不是真的内容
+        for (let iter = 0; iter < 8 && t <= 0.5; iter++) {
+          const b = quadBBox(best);
+          if (cb.minX >= b.minX - tol && cb.minY >= b.minY - tol
+            && cb.maxX <= b.maxX + tol && cb.maxY <= b.maxY + tol) break;
+          t += 0.07;
+          best = expandQuad(original, t);
+        }
+        // 只在确实扩了且结果不超出图片时才使用, 否则回到原框
+        if (t > 0 && t <= 0.5) {
+          const b = quadBBox(best);
+          const bw = b.maxX - b.minX, bh = b.maxY - b.minY;
+          if (bw <= W * 0.95 && bh <= H * 0.95) {
+            method = method + '+内容扩';
+          } else {
+            best = original;
+          }
+        } else {
+          best = original;
+        }
+      }
+    }
+  }
+
   return { quad: best, score: expanded[0].score, method, alts };
 }
 
