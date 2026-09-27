@@ -2,6 +2,7 @@
 import { findCardQuad, warpCard, mergeSides } from './detect.js';
 import { canvasesToPdf } from './pdfout.js';
 import { QuadEditor } from './adjust.js';
+import { docxToCanvases } from './docx.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -87,8 +88,11 @@ const IMAGE_MIME = {
 };
 const ACCEPT_IMAGE = { description: '图片', accept: IMAGE_MIME };
 const ACCEPT_ANY = {
-  description: 'PDF 和图片',
-  accept: Object.assign({ 'application/pdf': ['.pdf'] }, IMAGE_MIME),
+  description: 'PDF / Word / 图片',
+  accept: Object.assign({
+    'application/pdf': ['.pdf'],
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+  }, IMAGE_MIME),
 };
 
 // 通用拖放/点选绑定
@@ -421,6 +425,8 @@ function loadPdfJs() {
 }
 
 const isPdf = (f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf';
+const isDocx = (f) => /\.docx$/i.test(f.name)
+  || f.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
 // PDF 每页渲染成 canvas
 async function pdfToCanvases(file, dpi) {
@@ -485,7 +491,9 @@ $('btn-conv').addEventListener('click', async () => {
       await new Promise(r => setTimeout(r, 15));
       const canvases = isPdf(entry.file)
         ? await pdfToCanvases(entry.file, dpi)
-        : [await imageToCanvas(entry.file)];
+        : isDocx(entry.file)
+          ? await docxToCanvases(entry.file)
+          : [await imageToCanvas(entry.file)];
       const base = stripExt(entry.file.name);
       if (target === 'pdf') {
         const blob = await canvasesToPdf(canvases, quality);
