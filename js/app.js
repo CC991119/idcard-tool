@@ -1,6 +1,6 @@
 // 界面逻辑: 全部在浏览器本地运行, 不上传任何文件
 import { findCardQuad, warpCard, mergeSides } from './detect.js';
-import { canvasesToPdf } from './pdfout.js';
+import { canvasToJpegPage, pagesToPdf } from './pdfout.js';
 import { QuadEditor } from './adjust.js';
 import { docxToCanvases } from './docx.js';
 
@@ -428,35 +428,87 @@ const isPdf = (f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf';
 const isDocx = (f) => /\.docx$/i.test(f.name)
   || f.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
-// PDF 每页渲染成 canvas
-async function pdfToCanvases(file, dpi) {
-  const pdfjs = await loadPdfJs();
-  const buf = await file.arrayBuffer();
-  const doc = await pdfjs.getDocument({ data: buf }).promise;
-  const pages = [];
-  const scale = dpi / 72;
-  for (let p = 1; p <= doc.numPages; p++) {
-    const page = await doc.getPage(p);
-    const vp = page.getViewport({ scale });
-    const c = document.createElement('canvas');
-    c.width = Math.ceil(vp.width);
-    c.height = Math.ceil(vp.height);
-    const ctx = c.getContext('2d');
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(0, 0, c.width, c.height);
-    await page.render({ canvasContext: ctx, viewport: vp }).promise;
-    pages.push(c);
-  }
-  return pages;
+// 单页画布像素上限。超过这个量, 浏览器内存不够会**静默画出坏内容**,
+// 而且是时好时坏(取决于当时内存), 表现就是"转出来的图少了很多东西, 没规律"。
+const MAX_PDF_PX = 32e6;   // PDF 每页最多 ~32 兆像素 (实测 64MP 以上会把页面卡死)
+const MAX_IMG_PX = 40e6;   // 单张图片最多 ~40 兆像素
+const MAX_SIDE = 9000;     // 单边上限
+
+function capScale(wPt, hPt, scale, maxPx) {
+  let s = scale;
+  const px = (wPt * s) * (hPt * s);
+  if (px > maxPx) s *= Math.sqrt(maxPx / px);
+  const long = Math.max(wPt, hPt) * s;
+  if (long > MAX_SIDE) s *= MAX_SIDE / long;
+  return s;
 }
 
-// 图片文件 -> canvas
+// 逐页产出 canvas: 每页处理完交给回调, 回调返回后**立刻释放这一页的位图**。
+// 多页 PDF 不再把所有页的画布同时堆在内存里 -> 又快又不会炸。
+async function eachPage(file, dpi, onPage) {
+  if (isPdf(file)) {
+    const pdfjs = await loadPdfJs();
+    const buf = await file.arrayBuffer();
+    const doc = await pdfjs.getDocument({ data: buf }).promise;
+    try {
+      for (let p = 1; p <= doc.numPages; p++) {
+        const page = await doc.getPage(p);
+        const vp1 = page.getViewport({ scale: 1 });
+        const want = dpi / 72;
+        const s = capScale(vp1.width, vp1.height, want, MAX_PDF_PX);
+        const vp = page.getViewport({ scale: s });
+        const c = document.createElement('canvas');
+        c.width = Math.ceil(vp.width);
+        c.height = Math.ceil(vp.height);
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, c.width, c.height);
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        await onPage(c, { total: doc.numPages, capped: s < want - 1e-6, effDpi: Math.round(s * 72) });
+        c.width = 0; c.height = 0;
+        if (page.cleanup) page.cleanup();
+      }
+    } finally {
+      if (doc.destroy) await doc.destroy();
+    }
+  } else if (isDocx(file)) {
+    const canvases = await docxToCanvases(file);
+    for (const c of canvases) {
+      await onPage(c, { total: canvases.length });
+      c.width = 0; c.height = 0;
+    }
+  } else {
+    const c = await imageToCanvas(file);
+    await onPage(c, { total: 1, capped: !!c.__capped });
+    c.width = 0; c.height = 0;
+  }
+}
+
+// 图片文件 -> canvas (直接绘制, 不再做 ImageData 往返, 大图快很多)
 async function imageToCanvas(file) {
-  const d = await fileToImageData(file);
-  const c = document.createElement('canvas');
-  c.width = d.width; c.height = d.height;
-  c.getContext('2d').putImageData(d, 0, 0);
-  return c;
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => {
+      const im = new Image();
+      im.onload = () => res(im);
+      im.onerror = () => rej(new Error('这个文件不是能识别的图片'));
+      im.src = url;
+    });
+    const w0 = img.naturalWidth, h0 = img.naturalHeight;
+    let s = 1;
+    if (w0 * h0 > MAX_IMG_PX) s = Math.sqrt(MAX_IMG_PX / (w0 * h0));
+    if (Math.max(w0, h0) * s > MAX_SIDE) s = MAX_SIDE / Math.max(w0, h0);
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w0 * s));
+    c.height = Math.max(1, Math.round(h0 * s));
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    if (s < 1) c.__capped = true;
+    return c;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 function canvasToBlob(canvas, target, quality) {
@@ -489,23 +541,29 @@ $('btn-conv').addEventListener('click', async () => {
     try {
       setConvStatus('正在处理：' + entry.file.name);
       await new Promise(r => setTimeout(r, 15));
-      const canvases = isPdf(entry.file)
-        ? await pdfToCanvases(entry.file, dpi)
-        : isDocx(entry.file)
-          ? await docxToCanvases(entry.file)
-          : [await imageToCanvas(entry.file)];
       const base = stripExt(entry.file.name);
+      let capped = false, effDpi = 0;
       if (target === 'pdf') {
-        const blob = await canvasesToPdf(canvases, quality);
+        const pages = [];
+        await eachPage(entry.file, dpi, async (c, info) => {
+          if (info && info.capped) { capped = true; effDpi = info.effDpi || 0; }
+          pages.push(await canvasToJpegPage(c, quality)); // 编码完就释放原始 canvas
+        });
+        const blob = pagesToPdf(pages);
         entry.results.push({ name: base + '.pdf', blob, idx: 1 });
-        entry.note = canvases.length + ' 页 → PDF';
+        entry.note = pages.length + ' 页 → PDF'
+          + (capped ? '（页面太大，清晰度已自动降到约 ' + effDpi + '）' : '');
       } else {
-        for (let i = 0; i < canvases.length; i++) {
-          const blob = await canvasToBlob(canvases[i], target, quality);
-          const suffix = canvases.length > 1 ? '-第' + (i + 1) + '页' : '';
-          entry.results.push({ name: base + suffix + '.' + target, blob, idx: i + 1 });
+        await eachPage(entry.file, dpi, async (c, info) => {
+          if (info && info.capped) capped = true;
+          const blob = await canvasToBlob(c, target, quality);
+          entry.results.push({ name: base + '.' + target, blob, idx: entry.results.length + 1 });
+        });
+        const n = entry.results.length;
+        if (n > 1) {
+          for (const r of entry.results) r.name = base + '-第' + r.idx + '页.' + target;
         }
-        entry.note = canvases.length > 1 ? canvases.length + ' 张图片' : '完成';
+        entry.note = (n > 1 ? n + ' 张图片' : '完成') + (capped ? '（图太大，已按上限缩放）' : '');
       }
       done++;
     } catch (err) {
