@@ -1,5 +1,5 @@
 // 身份证检测: 直线拟合(Hough) 为主 + 连通域为兜底 + 透视校正 + 拼接
-import { minAreaRect, orderPts, expandQuad, polygonArea, dist } from './geom.js';
+import { minAreaRect, orderPts, expandQuad, rectifyAspect, polygonArea, dist } from './geom.js';
 import { getPerspectiveTransform, applyM } from './geom.js';
 import { toGray, canny, close, open, connectedComponents, adaptiveThreshold, dilate, mergeNearby, gaussBlur } from './imgproc.js';
 
@@ -110,7 +110,24 @@ function houghLines(edge, w, h) {
   return lines.map(l => {
     const nx = Math.cos(l.theta * Math.PI / 180);
     const ny = Math.sin(l.theta * Math.PI / 180);
-    return { nx, ny, rho: l.rho, theta: l.theta, votes: l.votes };
+    // 这条线上边缘像素的跨度 (预测缺边时用来估边长), 以及两个端点
+    const dx = -ny, dy = nx;
+    let tmin = Infinity, tmax = -Infinity;
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      for (let x = 0; x < w; x++) {
+        if (!edge[row + x]) continue;
+        if (Math.abs(x * nx + y * ny - l.rho) > 2) continue;
+        const t = x * dx + y * dy;
+        if (t < tmin) tmin = t;
+        if (t > tmax) tmax = t;
+      }
+    }
+    if (!isFinite(tmin)) { tmin = 0; tmax = 0; }
+    const span = tmax - tmin;
+    const e1 = [l.rho * nx + tmin * dx, l.rho * ny + tmin * dy];
+    const e2 = [l.rho * nx + tmax * dx, l.rho * ny + tmax * dy];
+    return { nx, ny, rho: l.rho, theta: l.theta, votes: l.votes, span, e1, e2 };
   });
 }
 
@@ -217,7 +234,8 @@ function buildLineQuads(edge, lines, w, h) {
   const diag = Math.hypot(w, h);
 
   const quads = [];
-  const pushQuad = (A1, A2, B1, B2, perp) => {
+  // predSides: 哪几条边是"预测"出来的虚拟边 (下标含义: 0=A1边, 1=B2边, 2=A2边, 3=B1边)
+  const pushQuad = (A1, A2, B1, B2, perp, predSides = []) => {
     let pts = [];
     for (const [ai, bi] of [[0, 0], [0, 1], [1, 1], [1, 0]]) {
       const p = lineIntersect([A1, A2][ai], [B1, B2][bi]);
@@ -233,7 +251,7 @@ function buildLineQuads(edge, lines, w, h) {
     if (short < minDim * 0.09) return;
     const ar = long / short;
     if (ar > 3.2) return;
-    quads.push({ pts, lines: [A1, A2, B1, B2], perp, frac, ar, isLine: true });
+    quads.push({ pts, lines: [A1, A2, B1, B2], perp, frac, ar, isLine: true, predSides });
   };
 
   // 近平行线对 (透视下对边夹角可达 30 度以上, 放宽)
@@ -264,37 +282,42 @@ function buildLineQuads(edge, lines, w, h) {
     }
   }
 
-  // 路径 2: 平行对 + 1 条近垂直线, 第 4 条边按平行四边形外推预测
-  // (透视下两条对边不平行, 用线距比例预测会错, 必须从实际角点外推)
+  // 路径 2: 平行对 (A1,A2) + 一条近垂直线 L -> 预测与 L 平行的第 4 条边。
+  // 真实照片里卡的某条边常因反光/低对比整条检不出, 必须能补上。
+  // 矩形里"第 4 边到 L 的距离" = A 这条边的长度: 用 A 的检出跨度估最准, 长宽比兜底。
   for (const [A1, A2] of workPairs) {
+    const sepA = Math.abs(A1.rho - A2.rho);
+    const spanA = Math.max(A1.span || 0, A2.span || 0);
+    const spanOk = spanA > minDim * 0.3 && spanA < diag * 0.95;
     for (const L of lines) {
       if (L === A1 || L === A2) continue;
       const perp = Math.abs(angleDiffDeg(A1.theta, L.theta) - 90);
       if (perp > 26) continue;
-      const P1 = lineIntersect(A1, L), P2 = lineIntersect(A2, L);
-      if (!P1 || !P2) continue;
-      const vx = P2[0] - P1[0], vy = P2[1] - P1[1];
-      for (const f of [CARD_ASPECT, 1 / CARD_ASPECT]) {
+      const dists = [];
+      if (spanOk) dists.push(spanA * 1.05);
+      else dists.push(CARD_ASPECT * sepA, (1 / CARD_ASPECT) * sepA);
+      for (const d of dists) {
         for (const sign of [1, -1]) {
-          // 第 4 角 ≈ P1 + (P2-P1)*f*sign, 第 4 条边过该点、方向同 L
-          const Dx = P1[0] + vx * f * sign, Dy = P1[1] + vy * f * sign;
-          const rhoP = Dx * L.nx + Dy * L.ny;
+          const rhoP = L.rho + sign * d;
           if (rhoP < -diag * 0.15 || rhoP > diag * 1.1) continue;
-          const pred = { nx: L.nx, ny: L.ny, rho: rhoP, theta: L.theta, votes: 0 };
-          // 预测位置附近若真有一条检出线, 用检出线 (更准)
-          let partner = pred;
-          let bestScore = Infinity;
+          // 预测位置附近若真有检出线, 用检出线(更准); 否则用虚拟预测线
+          let partner = null, bestScore = Infinity;
           for (const l2 of lines) {
             if (l2 === A1 || l2 === A2 || l2 === L) continue;
             const dth = angleDiffDeg(l2.theta, L.theta);
-            if (dth > 12) continue;
+            if (dth > 10) continue;
             const dr = Math.abs(l2.rho - rhoP);
-            if (dr > Math.max(18, minDim * 0.04)) continue;
+            if (dr > Math.max(14, minDim * 0.035)) continue;
             const s = dth * 3 + dr;
             if (s < bestScore) { bestScore = s; partner = l2; }
           }
+          let predSides = [];
+          if (!partner) {
+            partner = { nx: L.nx, ny: L.ny, rho: rhoP, theta: L.theta, votes: 0 };
+            predSides = [1]; // 角点顺序里, 边 1-2 落在 B2(=partner) 上
+          }
           const perp2 = Math.abs(angleDiffDeg(A1.theta, partner.theta) - 90);
-          pushQuad(A1, A2, L, partner, Math.max(perp, perp2));
+          pushQuad(A1, A2, L, partner, Math.max(perp, perp2), predSides);
         }
       }
     }
@@ -362,7 +385,15 @@ function scoreQuadFull(edgeData, w, h, q) {
     sideSupport(edgeData, w, h, pts[2], pts[3]),
     sideSupport(edgeData, w, h, pts[3], pts[0]),
   ];
-  const sup = (perSide[0] + perSide[1] + perSide[2] + perSide[3]) / 4;
+  // 预测补全的框: 虚拟边本来就没有真边缘, 不能拿来拉低平均分, 否则永远打不过内部结构的假框
+  const pred = q.predSides || [];
+  let sup;
+  if (pred.length) {
+    const real = perSide.filter((_, i) => !pred.includes(i));
+    sup = real.length ? real.reduce((a, b) => a + b, 0) / real.length : 0;
+  } else {
+    sup = (perSide[0] + perSide[1] + perSide[2] + perSide[3]) / 4;
+  }
   const e = [0, 1, 2, 3].map(k => dist(pts[k], pts[(k + 1) % 4]));
   const ar = Math.max(...e) / Math.max(1, Math.min(...e));
   const arErr = Math.abs(ar - CARD_ASPECT) / CARD_ASPECT;
@@ -686,8 +717,16 @@ export function findCardQuad(rgba, W, H) {
   } catch (e) { /* ignore */ }
 
   // 过滤: 平均支撑度 + 单边支撑度下限 (堵住"3 条真边 + 1 条瞎预测")
-  pool = pool.filter(q => q.sup >= 0.45 && isFinite(q.score)
-    && q.perSide.every(s => s >= 0.15));
+  // 过滤: 真实框要求四边都有支撑; 预测补全框只要求"真实的那几条边"支撑足够
+  pool = pool.filter(q => {
+    if (!isFinite(q.score)) return false;
+    const pred = q.predSides || [];
+    if (pred.length) {
+      const real = q.perSide.filter((_, i) => !pred.includes(i));
+      return real.length >= 1 && real.every(s => s >= 0.4) && q.sup >= 0.35;
+    }
+    return q.sup >= 0.45 && q.perSide.every(s => s >= 0.15);
+  });
   // 位置接近的候选只留分高的
   pool.sort((a, b) => b.score - a.score);
   const diagW = Math.max(w, h);
@@ -710,9 +749,21 @@ export function findCardQuad(rgba, W, H) {
       if (q.score >= topScore - 0.03 && polygonArea(q.pts) > polygonArea(best.pts)) best = q;
     }
     let quad = best.pts;
+    // 置信度太低 (四条边都没多少真边缘支撑) -> 交回整张图, 让用户自己拖框, 别给个又小又错的框
+    if (best.sup < 0.7 && polygonArea(best.pts) / (w * h) < 0.12) {
+      return { quad: whole, score: best.score, method: 'fallback(弱)', alts: [] };
+    }
     // 直线候选做角点精修
     if (best.isLine && best.lines) {
       try { quad = refineQuad(best, edge, w, h); } catch (e) {}
+    }
+    // 有边是"预测"出来的 -> 那条边没检到, 位置本身有误差:
+    // 先把框按身份证长宽比 1.586 补正 (只扩张), 再留一圈安全边, 保证四角完整
+    if (best.predSides && best.predSides.length) {
+      quad = rectifyAspect(quad, CARD_ASPECT);
+      quad = expandQuad(quad, 0.16);
+    } else {
+      quad = expandQuad(quad, 0.03);
     }
     const alts = pool.slice(1, 4).map(q => ({ quad: toFull(q.pts), score: q.score, method: q.isLine ? '直线候选' : '区域候选' }));
     for (const a of legacyAlts) alts.push({ quad: toFull(a.quad), score: a.score ?? 0, method: a.method });
@@ -720,7 +771,7 @@ export function findCardQuad(rgba, W, H) {
     return {
       quad: toFull(quad),
       score: best.score,
-      method: (best.isLine ? '直线(' : '区域(') + best.sup.toFixed(2) + ')',
+      method: (best.isLine ? '直线(' : '区域(') + best.sup.toFixed(2) + (best.predSides && best.predSides.length ? ',补边' : '') + ')',
       alts,
     };
   }
