@@ -97,6 +97,33 @@ export function expandQuad(quad, ratio) {
   return quad.map(p => [cx + (p[0] - cx) * (1 + ratio), cy + (p[1] - cy) * (1 + ratio)]);
 }
 
+// 把四边形"补正"到目标长宽比 (只扩张、不收缩 -> 宁可多带背景, 不切内容)
+// 身份证真实长宽比 1.586; 透视/漏检会让框变扁, 这里把短边补回来
+export function rectifyAspect(quad, aspect) {
+  const cx = quad.reduce((s, p) => s + p[0], 0) / quad.length;
+  const cy = quad.reduce((s, p) => s + p[1], 0) / quad.length;
+  const e0 = dist(quad[0], quad[1]);
+  const e1 = dist(quad[1], quad[2]);
+  if (e0 < 1e-6 || e1 < 1e-6) return quad;
+  const long = Math.max(e0, e1), short = Math.min(e0, e1);
+  const ar = long / short;
+  if (Math.abs(ar - aspect) < 1e-3) return quad;
+  // 长轴方向
+  let ux, uy;
+  if (e0 >= e1) { ux = (quad[1][0] - quad[0][0]) / e0; uy = (quad[1][1] - quad[0][1]) / e0; }
+  else { ux = (quad[2][0] - quad[1][0]) / e1; uy = (quad[2][1] - quad[1][1]) / e1; }
+  const growShort = ar > aspect;               // 太扁 -> 补短轴
+  const f = growShort ? (ar / aspect) : (aspect / ar);
+  return quad.map(p => {
+    const vx = p[0] - cx, vy = p[1] - cy;
+    const t = vx * ux + vy * uy;               // 长轴分量
+    let px = vx - t * ux, py = vy - t * uy;    // 短轴分量
+    let nt = t;
+    if (growShort) { px *= f; py *= f; } else { nt = t * f; }
+    return [cx + px + nt * ux, cy + py + nt * uy];
+  });
+}
+
 // 8x8 线性方程组: 高斯消元 + 部分选主元
 function solve8(A, b) {
   const n = 8;
