@@ -428,6 +428,46 @@ const isPdf = (f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf';
 const isDocx = (f) => /\.docx$/i.test(f.name)
   || f.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
+// ---- pdf.js 的 CJK 字符映射表 (CMap) ----
+// 没有它, PDF 里的中文会**整段渲染不出**(数字能出、中文空白), 而且是"缺一块少一块"很难查。
+// 本站已内置常用中/日/韩 CMap (vendor/cmaps, 共 ~276KB), 首选本地, 失败再走镜像。
+const PDFJS_VER = '4.7.76';
+const CMAP_PROBE = 'UniGB-UCS2-H.bcmap';
+const CMAP_BASES = [
+  new URL('../vendor/cmaps/', import.meta.url).href,
+  `https://registry.npmmirror.com/pdfjs-dist/${PDFJS_VER}/files/cmaps/`,
+  `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/cmaps/`,
+  `https://unpkg.com/pdfjs-dist@${PDFJS_VER}/cmaps/`,
+];
+const FONT_BASES = [
+  new URL('../vendor/standard_fonts/', import.meta.url).href,
+  `https://registry.npmmirror.com/pdfjs-dist/${PDFJS_VER}/files/standard_fonts/`,
+  `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/standard_fonts/`,
+  `https://unpkg.com/pdfjs-dist@${PDFJS_VER}/standard_fonts/`,
+];
+let cmapBasePromise = null;
+let fontBasePromise = null;
+
+function firstReachable(bases, probe) {
+  return (async () => {
+    for (const base of bases) {
+      try {
+        const r = await fetch(base + probe, { method: 'HEAD' });
+        if (r.ok) return base;
+      } catch (e) { /* 该源不可用, 试下一个 */ }
+    }
+    return null;
+  })();
+}
+function resolveCmapBase() {
+  if (!cmapBasePromise) cmapBasePromise = firstReachable(CMAP_BASES, CMAP_PROBE);
+  return cmapBasePromise;
+}
+function resolveFontBase() {
+  if (!fontBasePromise) fontBasePromise = firstReachable(FONT_BASES, 'LiberationSans-Regular.ttf');
+  return fontBasePromise;
+}
+
 // 单页画布像素上限。超过这个量, 浏览器内存不够会**静默画出坏内容**,
 // 而且是时好时坏(取决于当时内存), 表现就是"转出来的图少了很多东西, 没规律"。
 const MAX_PDF_PX = 32e6;   // PDF 每页最多 ~32 兆像素 (实测 64MP 以上会把页面卡死)
@@ -449,7 +489,12 @@ async function eachPage(file, dpi, onPage) {
   if (isPdf(file)) {
     const pdfjs = await loadPdfJs();
     const buf = await file.arrayBuffer();
-    const doc = await pdfjs.getDocument({ data: buf }).promise;
+    const opts = { data: buf };
+    const cmap = await resolveCmapBase();
+    if (cmap) { opts.cMapUrl = cmap; opts.cMapPacked = true; }
+    const fonts = await resolveFontBase();
+    if (fonts) opts.standardFontDataUrl = fonts;
+    const doc = await pdfjs.getDocument(opts).promise;
     try {
       for (let p = 1; p <= doc.numPages; p++) {
         const page = await doc.getPage(p);
