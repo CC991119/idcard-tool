@@ -21,8 +21,15 @@ async function canvasToJpegBytes(canvas, quality) {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
-export async function canvasesToPdf(canvases, quality = 0.92) {
-  if (!canvases.length) throw new Error('没有可用的页面');
+// 把一张 canvas 编码成 PDF 用的 JPEG 页 (垫白底)
+export async function canvasToJpegPage(canvas, quality = 0.92) {
+  const bytes = await canvasToJpegBytes(canvas, quality);
+  return { bytes, w: canvas.width, h: canvas.height };
+}
+
+// 用"已编码好的页面"组装 PDF (不再持有原始 canvas -> 内存占用低很多)
+export function pagesToPdf(pages) {
+  if (!pages.length) throw new Error('没有可用的页面');
   const enc = new TextEncoder();
   const chunks = [];
   const offsets = [];
@@ -34,22 +41,17 @@ export async function canvasesToPdf(canvases, quality = 0.92) {
   };
   const pushStr = (s) => push(enc.encode(s));
 
-  // 对象编号: 1=Catalog, 2=Pages, 之后每页占 3 个 (Page, Content, Image)
-  const pageCount = canvases.length;
+  const pageCount = pages.length;
   const objCount = 2 + pageCount * 3;
   const startObj = (n) => { offsets[n] = pos; pushStr(n + ' 0 obj\n'); };
   const endObj = () => pushStr('endobj\n');
 
   pushStr('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
 
-  // 预先取出每页图片数据和尺寸 (72dpi 排版, 按 150dpi 缩放页面)
-  const pages = [];
-  for (const c of canvases) {
-    const bytes = await canvasToJpegBytes(c, quality);
-    // 用 96dpi 折算成点(1/72 inch), 让 A4 附近的图接近实际纸张大小
-    const wPt = (c.width / 96) * 72;
-    const hPt = (c.height / 96) * 72;
-    pages.push({ bytes, w: c.width, h: c.height, wPt, hPt });
+  // 用 96dpi 折算成点, 让 A4 附近的图接近实际纸张大小
+  for (const p of pages) {
+    p.wPt = (p.w / 96) * 72;
+    p.hPt = (p.h / 96) * 72;
   }
 
   startObj(1);
@@ -84,7 +86,6 @@ export async function canvasesToPdf(canvases, quality = 0.92) {
     endObj();
   });
 
-  // 交叉引用表
   const xrefPos = pos;
   let xref = 'xref\n0 ' + (objCount + 1) + '\n0000000000 65535 f \n';
   for (let n = 1; n <= objCount; n++) {
@@ -94,4 +95,10 @@ export async function canvasesToPdf(canvases, quality = 0.92) {
   pushStr('trailer\n<< /Size ' + (objCount + 1) + ' /Root 1 0 R >>\nstartxref\n' + xrefPos + '\n%%EOF\n');
 
   return new Blob(chunks, { type: 'application/pdf' });
+}
+
+export async function canvasesToPdf(canvases, quality = 0.92) {
+  const pages = [];
+  for (const c of canvases) pages.push(await canvasToJpegPage(c, quality));
+  return pagesToPdf(pages);
 }
